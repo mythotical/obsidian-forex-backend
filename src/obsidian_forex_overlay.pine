@@ -1,0 +1,422 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0
+// © Obsidian Forex — https://github.com/mythotical/obsidian-forex-backend
+//@version=5
+indicator(
+     title         = "Obsidian Forex",
+     shorttitle    = "OBF",
+     overlay       = true,
+     max_labels_count = 500,
+     max_lines_count  = 500,
+     max_bars_back    = 500)
+
+// ════════════════════════════════════════════════════════════════
+// INPUTS
+// ════════════════════════════════════════════════════════════════
+
+// ── Signal Settings ──────────────────────────────────────────────
+i_buyThresh  = input.int(75, "BUY Threshold  (Score ≥)",   minval=51, maxval=99, group="Signal Settings",
+     tooltip="Issue a BUY signal when the confluence score is at or above this value.")
+i_sellThresh = input.int(25, "SELL Threshold (Score ≤)",   minval=1,  maxval=49, group="Signal Settings",
+     tooltip="Issue a SELL signal when the confluence score is at or below this value.")
+i_minBars    = input.int(5,  "Min Bars Between Signals",   minval=1,  maxval=50, group="Signal Settings",
+     tooltip="Anti-whipsaw filter: minimum bars that must pass before a new signal can fire.")
+
+// ── Timeframes ───────────────────────────────────────────────────
+i_tf1 = input.timeframe("5",  "TF 1 — Primary (5 m)",   group="Timeframes")
+i_tf2 = input.timeframe("10", "TF 2          (10 m)",   group="Timeframes")
+i_tf3 = input.timeframe("30", "TF 3          (30 m)",   group="Timeframes")
+i_tf4 = input.timeframe("60", "TF 4           (1 H)",   group="Timeframes")
+
+// ── EMA Ribbon ───────────────────────────────────────────────────
+i_ema1 = input.int(8,  "EMA Fast",  minval=1, group="EMA Ribbon")
+i_ema2 = input.int(21, "EMA Mid",   minval=1, group="EMA Ribbon")
+i_ema3 = input.int(55, "EMA Slow",  minval=1, group="EMA Ribbon")
+
+// ── Supertrend ───────────────────────────────────────────────────
+i_stMult   = input.float(2.0, "Multiplier",  minval=0.1, step=0.1, group="Supertrend")
+i_stPeriod = input.int(10,   "ATR Period",   minval=1,              group="Supertrend")
+
+// ── RSI ──────────────────────────────────────────────────────────
+i_rsiLen = input.int(14, "Length", minval=1, group="RSI")
+
+// ── MACD ─────────────────────────────────────────────────────────
+i_macdFast = input.int(12, "Fast Length",   minval=1, group="MACD")
+i_macdSlow = input.int(26, "Slow Length",   minval=1, group="MACD")
+i_macdSig  = input.int(9,  "Signal Length", minval=1, group="MACD")
+
+// ── Stochastic RSI ───────────────────────────────────────────────
+i_srsiLen   = input.int(14, "RSI Length",    minval=1, group="Stochastic RSI")
+i_srsiStoch = input.int(14, "Stoch Length",  minval=1, group="Stochastic RSI")
+i_srsiSmK   = input.int(3,  "K Smooth",      minval=1, group="Stochastic RSI")
+i_srsiSmD   = input.int(3,  "D Smooth",      minval=1, group="Stochastic RSI")
+
+// ── Bollinger Bands ──────────────────────────────────────────────
+i_bbLen  = input.int(20,    "Length",      minval=1,   group="Bollinger Bands")
+i_bbMult = input.float(2.0, "Multiplier",  minval=0.1, group="Bollinger Bands")
+
+// ── ATR / SL-TP ──────────────────────────────────────────────────
+i_atrLen = input.int(14,    "ATR Length",    minval=1,   group="ATR / SL-TP")
+i_slMult = input.float(1.5, "SL Multiplier", minval=0.1, step=0.1, group="ATR / SL-TP",
+     tooltip="Stop-loss distance = ATR × multiplier.  TP levels use 1:1, 1:2, and 1:3 RR from SL.")
+
+// ── Visual ───────────────────────────────────────────────────────
+i_showRibbon = input.bool(true, "Show EMA Ribbon",       group="Visual")
+i_showBg     = input.bool(true, "Show Background Color", group="Visual")
+i_showSlTp   = input.bool(true, "Show SL / TP Lines",    group="Visual")
+i_showDash   = input.bool(true, "Show Dashboard",        group="Visual")
+
+// ════════════════════════════════════════════════════════════════
+// INSTRUMENT AUTO-DETECTION
+// ════════════════════════════════════════════════════════════════
+_tk       = syminfo.ticker
+isGold    = str.contains(_tk, "XAUUSD") or str.contains(_tk, "GOLD")
+isIndex   = str.contains(_tk, "NAS") or str.contains(_tk, "NDX") or
+             str.contains(_tk, "US500") or str.contains(_tk, "SPX")
+isCrypto  = str.contains(_tk, "BTC") or str.contains(_tk, "ETH") or str.contains(_tk, "XRP")
+instrType = isGold ? "GOLD" : isIndex ? "INDEX" : isCrypto ? "CRYPTO" : "FOREX"
+
+// Wider SL multiplier for volatile instruments
+slMultiplier = isGold ? i_slMult * 1.5 : isIndex ? i_slMult * 1.3 : isCrypto ? i_slMult * 1.4 : i_slMult
+
+// ════════════════════════════════════════════════════════════════
+// CORE SIGNAL FUNCTION  (evaluated per-timeframe via request.security)
+//
+// Returns a 7-tuple:
+//   [rawScore, emaBull, emaBear, rsi, macdBull, macdBear, stochK]
+//   rawScore : 0 – 100 (normalised confluence score for this TF)
+// ════════════════════════════════════════════════════════════════
+f_indicators() =>
+    // ── EMA Ribbon ─────────────────────────────────────────────
+    e1 = ta.ema(close, i_ema1)
+    e2 = ta.ema(close, i_ema2)
+    e3 = ta.ema(close, i_ema3)
+    emaBull = e1 > e2 and e2 > e3 and close > e1
+    emaBear = e1 < e2 and e2 < e3 and close < e1
+
+    // ── Supertrend ─────────────────────────────────────────────
+    [stVal, _] = ta.supertrend(i_stMult, i_stPeriod)
+    stBull = close > stVal   // price above supertrend line → bullish
+
+    // ── RSI ────────────────────────────────────────────────────
+    rsi     = ta.rsi(close, i_rsiLen)
+    rsiBull = rsi > 50 and rsi < 70
+    rsiBear = rsi < 50 and rsi > 30
+    rsiOB   = rsi >= 70
+    rsiOS   = rsi <= 30
+
+    // ── MACD ───────────────────────────────────────────────────
+    [macdL, sigL, histL] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+    macdBull = macdL > sigL and histL > 0
+    macdBear = macdL < sigL and histL < 0
+
+    // ── Stochastic RSI ─────────────────────────────────────────
+    _rsiRaw = ta.rsi(close, i_srsiLen)
+    stochK  = ta.sma(ta.stoch(_rsiRaw, _rsiRaw, _rsiRaw, i_srsiStoch), i_srsiSmK)
+    stochD  = ta.sma(stochK, i_srsiSmD)
+    srBull  = stochK > stochD and stochK < 80
+    srBear  = stochK < stochD and stochK > 20
+    srOS    = stochK <= 20
+    srOB    = stochK >= 80
+
+    // ── Volume (VWMA vs SMA) ───────────────────────────────────
+    volBull = ta.vwma(close, 20) > ta.sma(close, 20)
+
+    // ── Bollinger Bands ────────────────────────────────────────
+    [bbMid, bbUp, bbLo] = ta.bb(close, i_bbLen, i_bbMult)
+    bbBull = close > bbMid and close < bbUp
+    bbBear = close < bbMid and close > bbLo
+
+    // ── Confluence Score (max 100) ─────────────────────────────
+    //   EMA ribbon       : 20 pts
+    //   Supertrend       : 15 pts
+    //   RSI              : 15 pts
+    //   MACD             : 15 pts
+    //   Stochastic RSI   : 15 pts
+    //   Volume           : 10 pts
+    //   Bollinger Bands  : 10 pts
+    //   Total            : 100 pts
+    score = 0.0
+    score += emaBull ? 20.0 : emaBear ? 0.0 : 10.0
+    score += stBull  ? 15.0 : 0.0
+    score += rsiBull ? 15.0 : rsiOS ? 12.0 : rsiOB ? 3.0  : rsiBear ? 0.0 : 7.5
+    score += macdBull ? 15.0 : macdBear ? 0.0 : 7.5
+    score += srBull  ? 15.0 : srOS ? 12.0   : srOB ? 3.0  : srBear  ? 0.0 : 7.5
+    score += volBull ? 10.0 : 0.0
+    score += bbBull  ? 10.0 : bbBear ? 0.0  : 5.0
+
+    [score, emaBull, emaBear, rsi, macdBull, macdBear, stochK]
+
+// ════════════════════════════════════════════════════════════════
+// MULTI-TIMEFRAME REQUESTS
+// Weights : 5 m = 15 %, 10 m = 20 %, 30 m = 30 %, 1 H = 35 %
+// ════════════════════════════════════════════════════════════════
+[sc1, bull1, bear1, rsi1, mb1, mr1, sk1] = request.security(
+     syminfo.tickerid, i_tf1, f_indicators(), lookahead=barmerge.lookahead_off)
+[sc2, bull2, bear2, rsi2, mb2, mr2, sk2] = request.security(
+     syminfo.tickerid, i_tf2, f_indicators(), lookahead=barmerge.lookahead_off)
+[sc3, bull3, bear3, rsi3, mb3, mr3, sk3] = request.security(
+     syminfo.tickerid, i_tf3, f_indicators(), lookahead=barmerge.lookahead_off)
+[sc4, bull4, bear4, rsi4, mb4, mr4, sk4] = request.security(
+     syminfo.tickerid, i_tf4, f_indicators(), lookahead=barmerge.lookahead_off)
+
+// Weighted aggregate (weights sum to 1.0 → result already 0 – 100)
+rawScore = sc1 * 0.15 + sc2 * 0.20 + sc3 * 0.30 + sc4 * 0.35
+
+// ════════════════════════════════════════════════════════════════
+// MARKET STRUCTURE (current timeframe — small ± adjustments)
+// ════════════════════════════════════════════════════════════════
+_LB     = 10
+hh      = high > ta.highest(high, _LB)[1]   // higher high
+ll      = low  < ta.lowest(low,   _LB)[1]   // lower low
+
+// Fair Value Gap
+bullFVG = low  > high[2]
+bearFVG = high < low[2]
+
+// Simple Order-Block: prior strong candle whose body we re-enter
+atr14cur    = ta.atr(i_atrLen)
+bigBullBody = close[2] > open[2] and (close[2] - open[2]) > atr14cur * 1.5
+bigBearBody = close[2] < open[2] and (open[2] - close[2]) > atr14cur * 1.5
+inBullOB    = bigBullBody and low <= close[2] and high >= open[2]
+inBearOB    = bigBearBody and high >= close[2] and low <= open[2]
+
+// Score micro-adjustments (+/- up to 5.5 pts)
+msAdj  = (hh ? 2.0 : 0.0) + (ll ? -2.0 : 0.0)
+fvgAdj = (bullFVG ? 2.0 : 0.0) + (bearFVG ? -2.0 : 0.0)
+obAdj  = (inBullOB ? 1.5 : 0.0) + (inBearOB ? -1.5 : 0.0)
+
+confluenceScore = int(math.max(0, math.min(100, rawScore + msAdj + fvgAdj + obAdj)))
+
+// ════════════════════════════════════════════════════════════════
+// SIGNAL LOGIC
+// ════════════════════════════════════════════════════════════════
+buySignal  = confluenceScore >= i_buyThresh
+sellSignal = confluenceScore <= i_sellThresh
+
+// Anti-whipsaw gate
+var int lastSignalBar = -999
+gapOk     = (bar_index - lastSignalBar) >= i_minBars
+buyFired  = buySignal  and gapOk and not sellSignal
+sellFired = sellSignal and gapOk and not buySignal
+
+if buyFired or sellFired
+    lastSignalBar := bar_index
+
+// ════════════════════════════════════════════════════════════════
+// DYNAMIC SL / TP  (instrument-adjusted ATR)
+// ════════════════════════════════════════════════════════════════
+sl  = atr14cur * slMultiplier   // stop-loss distance
+tp1 = sl                        // 1 : 1 RR
+tp2 = sl * 2.0                  // 1 : 2 RR
+tp3 = sl * 3.0                  // 1 : 3 RR
+
+// ════════════════════════════════════════════════════════════════
+// EMA RIBBON  (current chart timeframe)
+// ════════════════════════════════════════════════════════════════
+ema8c  = ta.ema(close, i_ema1)
+ema21c = ta.ema(close, i_ema2)
+ema55c = ta.ema(close, i_ema3)
+
+p1 = plot(i_showRibbon ? ema8c  : na, "EMA 8",  color=color.new(color.aqua,   60), linewidth=1)
+p2 = plot(i_showRibbon ? ema21c : na, "EMA 21", color=color.new(color.purple, 60), linewidth=1)
+p3 = plot(i_showRibbon ? ema55c : na, "EMA 55", color=color.new(color.orange, 60), linewidth=2)
+fill(p1, p2, color=color.new(ema8c  > ema21c ? color.teal   : color.maroon, 88))
+fill(p2, p3, color=color.new(ema21c > ema55c ? color.teal   : color.maroon, 88))
+
+// ════════════════════════════════════════════════════════════════
+// BACKGROUND TINT
+// ════════════════════════════════════════════════════════════════
+bgcolor(
+     i_showBg ? (buySignal  ? color.new(color.green, 93) :
+                 sellSignal ? color.new(color.red,   93) :
+                              color.new(color.gray,  97)) : na,
+     title="Trend Background")
+
+// ════════════════════════════════════════════════════════════════
+// SIGNAL LABELS + SL/TP LINES
+// ════════════════════════════════════════════════════════════════
+if buyFired
+    label.new(
+         bar_index, low,
+         text      = "▲  BUY\n" + str.tostring(confluenceScore) + " / 100",
+         style     = label.style_label_up,
+         color     = color.new(color.green, 5),
+         textcolor = color.white,
+         size      = size.normal)
+    if i_showSlTp
+        line.new(bar_index, low - sl,  bar_index + 20, low - sl,
+             color=color.red,   width=1, style=line.style_dashed)
+        line.new(bar_index, low + tp1, bar_index + 20, low + tp1,
+             color=color.lime,  width=1, style=line.style_dotted)
+        line.new(bar_index, low + tp2, bar_index + 20, low + tp2,
+             color=color.green, width=1, style=line.style_dotted)
+        line.new(bar_index, low + tp3, bar_index + 20, low + tp3,
+             color=color.teal,  width=2, style=line.style_dotted)
+
+if sellFired
+    label.new(
+         bar_index, high,
+         text      = "▼  SELL\n" + str.tostring(confluenceScore) + " / 100",
+         style     = label.style_label_down,
+         color     = color.new(color.red, 5),
+         textcolor = color.white,
+         size      = size.normal)
+    if i_showSlTp
+        line.new(bar_index, high + sl,  bar_index + 20, high + sl,
+             color=color.red,   width=1, style=line.style_dashed)
+        line.new(bar_index, high - tp1, bar_index + 20, high - tp1,
+             color=color.lime,  width=1, style=line.style_dotted)
+        line.new(bar_index, high - tp2, bar_index + 20, high - tp2,
+             color=color.green, width=1, style=line.style_dotted)
+        line.new(bar_index, high - tp3, bar_index + 20, high - tp3,
+             color=color.teal,  width=2, style=line.style_dotted)
+
+// ════════════════════════════════════════════════════════════════
+// DASHBOARD (top-right table, updated only on the last bar)
+// ════════════════════════════════════════════════════════════════
+if i_showDash and barstate.islast
+    var table dash = table.new(
+         position.top_right, 2, 12,
+         bgcolor      = color.rgb(18, 18, 30),
+         border_color = color.rgb(55, 55, 90),
+         border_width = 1,
+         frame_color  = color.rgb(70, 70, 110),
+         frame_width  = 1)
+
+    // ── colour helpers ────────────────────────────────────────
+    BG_HDR  = color.rgb(22, 22, 48)
+    BG_ROW  = color.rgb(28, 28, 52)
+    TXT_LBL = color.rgb(120, 120, 170)
+
+    sigTxt   = buySignal  ? "▲  BUY"    : sellSignal ? "▼  SELL" : "●  NEUTRAL"
+    sigClr   = buySignal  ? color.green  : sellSignal ? color.red  : color.gray
+    scoreClr = confluenceScore >= 75 ? color.green :
+               confluenceScore >= 50 ? color.yellow :
+               confluenceScore >= 25 ? color.orange : color.red
+
+    tf1Txt  = bull1 ? "▲" : bear1 ? "▼" : "●"
+    tf2Txt  = bull2 ? "▲" : bear2 ? "▼" : "●"
+    tf3Txt  = bull3 ? "▲" : bear3 ? "▼" : "●"
+    tf4Txt  = bull4 ? "▲" : bear4 ? "▼" : "●"
+    tf12Clr = bull1 and bull2 ? color.lime : bear1 and bear2 ? color.red : color.yellow
+    tf34Clr = bull3 and bull4 ? color.lime : bear3 and bear4 ? color.red : color.yellow
+
+    rsiNow  = ta.rsi(close, i_rsiLen)
+    rsiClr  = rsiNow >= 70 ? color.red : rsiNow <= 30 ? color.green : color.white
+
+    macdStatus = mb4 ? "Bullish ▲" : mr4 ? "Bearish ▼" : "Neutral ●"
+    macdClr    = mb4 ? color.green : mr4 ? color.red : color.gray
+
+    atrPct  = atr14cur / close * 100.0
+    volTxt  = atrPct > 0.5 ? "High"   : atrPct > 0.2 ? "Normal" : "Low"
+    volClr  = atrPct > 0.5 ? color.red : atrPct > 0.2 ? color.yellow : color.lime
+
+    _prec = math.pow(10, syminfo.mintick < 0.01 ? 5 : 2)
+
+    // ── header row ────────────────────────────────────────────
+    table.cell(dash, 0, 0, "OBSIDIAN FOREX",
+         bgcolor=BG_HDR, text_color=color.white,  text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 0, syminfo.ticker,
+         bgcolor=BG_HDR, text_color=color.yellow, text_size=size.small, text_halign=text.align_center)
+
+    // ── instrument type ───────────────────────────────────────
+    table.cell(dash, 0, 1, "Type",     bgcolor=BG_ROW, text_color=TXT_LBL,       text_size=size.small)
+    table.cell(dash, 1, 1, instrType,  bgcolor=BG_ROW, text_color=color.white,   text_size=size.small)
+
+    // ── signal ────────────────────────────────────────────────
+    table.cell(dash, 0, 2, "Signal",   bgcolor=BG_ROW, text_color=TXT_LBL,       text_size=size.small)
+    table.cell(dash, 1, 2, sigTxt,     bgcolor=sigClr, text_color=color.white,   text_size=size.normal,
+         text_halign=text.align_center)
+
+    // ── confluence score ──────────────────────────────────────
+    table.cell(dash, 0, 3, "Confluence", bgcolor=BG_ROW, text_color=TXT_LBL,     text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(confluenceScore) + " / 100",
+         bgcolor=scoreClr, text_color=color.white, text_size=size.small)
+
+    // ── per-timeframe trend ───────────────────────────────────
+    table.cell(dash, 0, 4, "5 m / 10 m",  bgcolor=BG_ROW, text_color=TXT_LBL,   text_size=size.small)
+    table.cell(dash, 1, 4, tf1Txt + "   /   " + tf2Txt,
+         bgcolor=BG_ROW, text_color=tf12Clr, text_size=size.small)
+
+    table.cell(dash, 0, 5, "30 m / 1 H",  bgcolor=BG_ROW, text_color=TXT_LBL,   text_size=size.small)
+    table.cell(dash, 1, 5, tf3Txt + "   /   " + tf4Txt,
+         bgcolor=BG_ROW, text_color=tf34Clr, text_size=size.small)
+
+    // ── RSI ───────────────────────────────────────────────────
+    table.cell(dash, 0, 6, "RSI (14)",
+         bgcolor=BG_ROW, text_color=TXT_LBL, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(math.round(rsiNow * 10) / 10),
+         bgcolor=BG_ROW, text_color=rsiClr,  text_size=size.small)
+
+    // ── MACD ──────────────────────────────────────────────────
+    table.cell(dash, 0, 7, "MACD",       bgcolor=BG_ROW, text_color=TXT_LBL,    text_size=size.small)
+    table.cell(dash, 1, 7, macdStatus,   bgcolor=BG_ROW, text_color=macdClr,    text_size=size.small)
+
+    // ── Volatility ────────────────────────────────────────────
+    table.cell(dash, 0, 8, "Volatility", bgcolor=BG_ROW, text_color=TXT_LBL,    text_size=size.small)
+    table.cell(dash, 1, 8, volTxt,       bgcolor=BG_ROW, text_color=volClr,     text_size=size.small)
+
+    // ── ATR ───────────────────────────────────────────────────
+    table.cell(dash, 0, 9, "ATR",
+         bgcolor=BG_ROW, text_color=TXT_LBL,     text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(math.round(atr14cur * _prec) / _prec),
+         bgcolor=BG_ROW, text_color=color.white,  text_size=size.small)
+
+    // ── SL ────────────────────────────────────────────────────
+    table.cell(dash, 0, 10, "SL (×" + str.tostring(slMultiplier, "#.##") + " ATR)",
+         bgcolor=BG_ROW, text_color=TXT_LBL,  text_size=size.tiny)
+    table.cell(dash, 1, 10, str.tostring(math.round(sl * _prec) / _prec),
+         bgcolor=BG_ROW, text_color=color.red, text_size=size.tiny)
+
+    // ── TP1 / TP2 / TP3 ──────────────────────────────────────
+    table.cell(dash, 0, 11, "TP1 / TP2 / TP3",
+         bgcolor=BG_ROW, text_color=TXT_LBL,   text_size=size.tiny)
+    table.cell(dash, 1, 11,
+         str.tostring(math.round(tp1 * _prec) / _prec) + "  /  " +
+         str.tostring(math.round(tp2 * _prec) / _prec) + "  /  " +
+         str.tostring(math.round(tp3 * _prec) / _prec),
+         bgcolor=BG_ROW, text_color=color.lime, text_size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════
+// DYNAMIC ALERTS  (fire at bar close; include confluence score)
+// ════════════════════════════════════════════════════════════════
+if buyFired
+    alert(
+         "🟢 BUY Signal | " + syminfo.ticker + " | Confluence: " +
+         str.tostring(confluenceScore) + "/100 | SL: " +
+         str.tostring(sl, "#.#####") + " | TP1: " + str.tostring(tp1, "#.#####") +
+         " | TP2: " + str.tostring(tp2, "#.#####") + " | TP3: " + str.tostring(tp3, "#.#####"),
+         alert.freq_once_per_bar_close)
+
+if sellFired
+    alert(
+         "🔴 SELL Signal | " + syminfo.ticker + " | Confluence: " +
+         str.tostring(confluenceScore) + "/100 | SL: " +
+         str.tostring(sl, "#.#####") + " | TP1: " + str.tostring(tp1, "#.#####") +
+         " | TP2: " + str.tostring(tp2, "#.#####") + " | TP3: " + str.tostring(tp3, "#.#####"),
+         alert.freq_once_per_bar_close)
+
+trendChange = (buyFired[1] and sellSignal) or (sellFired[1] and buySignal)
+if trendChange
+    alert(
+         "⚠️ Trend Change | " + syminfo.ticker + " | New Score: " +
+         str.tostring(confluenceScore) + "/100",
+         alert.freq_once_per_bar_close)
+
+// ════════════════════════════════════════════════════════════════
+// ALERT CONDITIONS  (user-configurable TradingView alert dialogs)
+// ════════════════════════════════════════════════════════════════
+alertcondition(buyFired,
+     title   = "Obsidian Forex — BUY Signal",
+     message = "🟢 Obsidian Forex BUY Signal | {{ticker}} | TF: {{interval}} | Close: {{close}}")
+
+alertcondition(sellFired,
+     title   = "Obsidian Forex — SELL Signal",
+     message = "🔴 Obsidian Forex SELL Signal | {{ticker}} | TF: {{interval}} | Close: {{close}}")
+
+alertcondition(trendChange,
+     title   = "Obsidian Forex — Trend Change",
+     message = "⚠️ Obsidian Forex Trend Change | {{ticker}} | TF: {{interval}} | Close: {{close}}")
+
+// ── Hidden plot so the confluence score is queryable by alerts ──
+plot(confluenceScore, "Confluence Score", display=display.none)
