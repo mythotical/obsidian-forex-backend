@@ -5,6 +5,27 @@ Format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] — 2026-03-03
+
+### Changed
+- **BUY threshold** lowered from 75 to **73** (mirrors the inverse of the SELL threshold at 25,
+  giving both signals equal sensitivity to the confluence score).
+- **Dead-cat-bounce guard added** — the only BUY-specific filter.  Price must NOT be more than
+  3 % below its 20-bar swing high while both the 30 m and 1 H timeframes are still bearish.
+  This prevents buying into brief relief rallies during sustained crashes while leaving the signal
+  path fully open during genuine uptrends.
+- **SELL logic is 100 % unchanged** — every SELL-related line is identical to v1.0.0.
+
+### Fixed
+- BUY signals now fire during strong uptrends (EMA ribbon green, price above all EMAs) that
+  were previously suppressed by an overly strict filter chain.
+
+### Dashboard
+- Added **"Dead Cat"** row (row 13) showing `✓ OK` or `⚠ DEAD CAT` to make the active
+  BUY filter state visible at a glance.
+
+---
+
 ## [1.0.0] — 2026-03-02
 
 ### Added

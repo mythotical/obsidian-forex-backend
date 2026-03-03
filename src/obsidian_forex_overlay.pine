@@ -14,7 +14,7 @@ indicator(
 // ════════════════════════════════════════════════════════════════
 
 // ── Signal Settings ──────────────────────────────────────────────
-i_buyThresh  = input.int(75, "BUY Threshold  (Score ≥)",   minval=51, maxval=99, group="Signal Settings",
+i_buyThresh  = input.int(73, "BUY Threshold  (Score ≥)",   minval=51, maxval=99, group="Signal Settings",
      tooltip="Issue a BUY signal when the confluence score is at or above this value.")
 i_sellThresh = input.int(25, "SELL Threshold (Score ≤)",   minval=1,  maxval=49, group="Signal Settings",
      tooltip="Issue a SELL signal when the confluence score is at or below this value.")
@@ -188,6 +188,16 @@ obAdj  = (inBullOB ? 1.5 : 0.0) + (inBearOB ? -1.5 : 0.0)
 confluenceScore = int(math.max(0, math.min(100, rawScore + msAdj + fvgAdj + obAdj)))
 
 // ════════════════════════════════════════════════════════════════
+// DEAD-CAT-BOUNCE GUARD  (BUY-only filter)
+// Suppresses BUY signals when price is in a crash / relief-bounce
+// situation: price is more than 3 % below the recent 20-bar swing
+// high AND both the 30 m and 1 H timeframes remain bearish.
+// This is the only extra filter applied to BUY signals.
+// ════════════════════════════════════════════════════════════════
+_dcHigh     = ta.highest(high, 20)
+deadCatZone = (_dcHigh - close) / _dcHigh > 0.03 and bear3 and bear4
+
+// ════════════════════════════════════════════════════════════════
 // SIGNAL LOGIC
 // ════════════════════════════════════════════════════════════════
 buySignal  = confluenceScore >= i_buyThresh
@@ -196,7 +206,7 @@ sellSignal = confluenceScore <= i_sellThresh
 // Anti-whipsaw gate
 var int lastSignalBar = -999
 gapOk     = (bar_index - lastSignalBar) >= i_minBars
-buyFired  = buySignal  and gapOk and not sellSignal
+buyFired  = buySignal  and gapOk and not sellSignal and not deadCatZone
 sellFired = sellSignal and gapOk and not buySignal
 
 if buyFired or sellFired
@@ -276,7 +286,7 @@ if sellFired
 // ════════════════════════════════════════════════════════════════
 if i_showDash and barstate.islast
     var table dash = table.new(
-         position.top_right, 2, 12,
+         position.top_right, 2, 13,
          bgcolor      = color.rgb(18, 18, 30),
          border_color = color.rgb(55, 55, 90),
          border_width = 1,
@@ -376,6 +386,12 @@ if i_showDash and barstate.islast
          str.tostring(math.round(tp2 * _prec) / _prec) + "  /  " +
          str.tostring(math.round(tp3 * _prec) / _prec),
          bgcolor=BG_ROW, text_color=color.lime, text_size=size.tiny)
+
+    // ── Dead Cat Zone (BUY filter) ────────────────────────────
+    dcTxt = deadCatZone ? "⚠ DEAD CAT" : "✓ OK"
+    dcClr = deadCatZone ? color.orange  : color.lime
+    table.cell(dash, 0, 12, "Dead Cat",  bgcolor=BG_ROW, text_color=TXT_LBL, text_size=size.small)
+    table.cell(dash, 1, 12, dcTxt,       bgcolor=BG_ROW, text_color=dcClr,   text_size=size.small)
 
 // ════════════════════════════════════════════════════════════════
 // DYNAMIC ALERTS  (fire at bar close; include confluence score)
