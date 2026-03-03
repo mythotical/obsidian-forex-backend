@@ -2,8 +2,8 @@
 // © Obsidian Forex — https://github.com/mythotical/obsidian-forex-backend
 //@version=5
 indicator(
-     title         = "Obsidian Forex",
-     shorttitle    = "OBF",
+     title         = "OBF v2 SCALPER",
+     shorttitle    = "OBF v2",
      overlay       = true,
      max_labels_count = 500,
      max_lines_count  = 500,
@@ -16,7 +16,7 @@ indicator(
 // ── Signal Settings ──────────────────────────────────────────────
 i_buyThresh  = input.int(75, "BUY Threshold  (Score ≥)",   minval=51, maxval=99, group="Signal Settings",
      tooltip="Issue a BUY signal when the confluence score is at or above this value.")
-i_sellThresh = input.int(25, "SELL Threshold (Score ≤)",   minval=1,  maxval=49, group="Signal Settings",
+i_sellThresh = input.int(28, "SELL Threshold (Score ≤)",   minval=1,  maxval=49, group="Signal Settings",
      tooltip="Issue a SELL signal when the confluence score is at or below this value.")
 i_minBars    = input.int(5,  "Min Bars Between Signals",   minval=1,  maxval=50, group="Signal Settings",
      tooltip="Anti-whipsaw filter: minimum bars that must pass before a new signal can fire.")
@@ -118,31 +118,43 @@ f_indicators() =>
     srOS    = stochK <= 20
     srOB    = stochK >= 80
 
-    // ── Volume (VWMA vs SMA) ───────────────────────────────────
-    volBull = ta.vwma(close, 20) > ta.sma(close, 20)
+    // ── Volume (above average) ─────────────────────────────────
+    volAboveAvg = volume > ta.sma(volume, 20)
 
     // ── Bollinger Bands ────────────────────────────────────────
     [bbMid, bbUp, bbLo] = ta.bb(close, i_bbLen, i_bbMult)
     bbBull = close > bbMid and close < bbUp
     bbBear = close < bbMid and close > bbLo
 
-    // ── Confluence Score (max 100) ─────────────────────────────
-    //   EMA ribbon       : 20 pts
-    //   Supertrend       : 15 pts
-    //   RSI              : 15 pts
-    //   MACD             : 15 pts
-    //   Stochastic RSI   : 15 pts
-    //   Volume           : 10 pts
-    //   Bollinger Bands  : 10 pts
-    //   Total            : 100 pts
+    // ── Price Action ────────────────────────────────────────────
+    bullPA = close > open
+    bearPA = close < open
+
+    // ── ADX (trend strength, direction-agnostic) ────────────────
+    [_diP, _diM, adxVal] = ta.dmi(14, 14)
+    isTrending = adxVal > 15
+
+    // ── Confluence Score (base 0–100 + directional bonuses) ─────
+    //   EMA ribbon       : 0 / 7.5 / 20 pts
+    //   Supertrend       : 0 / 15 pts
+    //   RSI              : 0 / 5.0 / 12–15 pts
+    //   MACD             : 0 / 5.0 / 15 pts
+    //   Stochastic RSI   : 0 / 5.0 / 12–15 pts
+    //   Bollinger Bands  : 0 / 2.5 / 10 pts
+    //   Volume bonus     : 0 / 5.0 / 10 pts (directional)
+    //   PA bonus         : -5 / 2.5 / 10 pts (directional)
+    //   ADX bonus        : 0 / 5 pts (trend strength)
     score = 0.0
-    score += emaBull ? 20.0 : emaBear ? 0.0 : 10.0
+    score += emaBull ? 20.0 : emaBear ? 0.0 : 7.5
     score += stBull  ? 15.0 : 0.0
-    score += rsiBull ? 15.0 : rsiOS ? 12.0 : rsiOB ? 3.0  : rsiBear ? 0.0 : 7.5
-    score += macdBull ? 15.0 : macdBear ? 0.0 : 7.5
-    score += srBull  ? 15.0 : srOS ? 12.0   : srOB ? 3.0  : srBear  ? 0.0 : 7.5
-    score += volBull ? 10.0 : 0.0
-    score += bbBull  ? 10.0 : bbBear ? 0.0  : 5.0
+    score += rsiBull ? 15.0 : rsiOS ? 12.0 : rsiOB ? 3.0  : rsiBear ? 0.0 : 5.0
+    score += macdBull ? 15.0 : macdBear ? 0.0 : 5.0
+    score += srBull  ? 15.0 : srOS ? 12.0   : srOB ? 3.0  : srBear  ? 0.0 : 5.0
+    score += bbBull  ? 10.0 : bbBear ? 0.0  : 2.5
+    volBonus  = volAboveAvg ? (bearPA ? 0.0 : 10.0) : 5.0
+    paBonus   = bullPA ? 10.0 : bearPA ? -5.0 : 2.5
+    adxBonus  = isTrending ? 5.0 : 0.0
+    score += volBonus + paBonus + adxBonus
 
     [score, emaBull, emaBear, rsi, macdBull, macdBear, stochK]
 
@@ -314,7 +326,7 @@ if i_showDash and barstate.islast
     _prec = math.pow(10, syminfo.mintick < 0.01 ? 5 : 2)
 
     // ── header row ────────────────────────────────────────────
-    table.cell(dash, 0, 0, "OBSIDIAN FOREX",
+    table.cell(dash, 0, 0, "OBF v2 SCALPER",
          bgcolor=BG_HDR, text_color=color.white,  text_size=size.small, text_halign=text.align_center)
     table.cell(dash, 1, 0, syminfo.ticker,
          bgcolor=BG_HDR, text_color=color.yellow, text_size=size.small, text_halign=text.align_center)
