@@ -5,6 +5,38 @@ Format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.1.0] — 2026-03-03
+
+### Fixed
+- **SELL signals never firing** — the confluence scoring system was bullish-biased,
+  preventing the score from dropping below the SELL threshold during genuine
+  bearish moves.
+
+### Changed
+- **`src/obsidian_forex_overlay.pine`** — Rebranded to **OBF v2 SCALPER**
+  - Indicator title updated to `"OBF v2 SCALPER"` / shorttitle `"OBF v2"`
+  - Dashboard header updated to `"OBF v2 SCALPER"`
+  - **Symmetric neutral scores** — reduced neutral fallback values so bearish
+    conditions push the score toward 0 as aggressively as bullish pushes toward 100:
+    - EMA ribbon neutral: `10.0` → `7.5`
+    - RSI neutral: `7.5` → `5.0`
+    - MACD neutral: `7.5` → `5.0`
+    - Stochastic RSI neutral: `7.5` → `5.0`
+    - Bollinger Bands neutral: `5.0` → `2.5`
+  - **Directional volume bonus** — replaced VWMA-vs-SMA proxy with real
+    volume-above-average detection; high volume on a bearish candle now scores
+    `0` (helping score drop) instead of giving a neutral positive contribution:
+    `volBonus = volAboveAvg ? (close < open ? 0.0 : 10.0) : 5.0`
+  - **Directional PA bonus** — price-action candle direction now penalises
+    bearish bars: `paBonus = bullPA ? 10.0 : bearPA ? -5.0 : 2.5`
+  - **ADX bonus** — added direction-agnostic trend-strength bonus via `ta.dmi()`;
+    strong trends (ADX > 15) add `5.0` regardless of direction:
+    `adxBonus = isTrending ? 5.0 : 0.0`
+  - **SELL threshold default raised** from `25` → `28` to make SELL signals
+    slightly easier to trigger in mixed-but-bearish environments
+
+---
+
 ## [1.0.0] — 2026-03-02
 
 ### Added
